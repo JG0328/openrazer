@@ -1334,6 +1334,19 @@ class RazerDevice(DBusService):
 
         return os.getgid() == file_group_id or file_group_name == 'plugdev'
 
+    @classmethod
+    def access_denied_message(cls, dev_path: str) -> str:
+        """
+        Message to log when check_access() refused the device
+
+        :param dev_path: Device path. Normally '/sys/bus/hid/devices/0000:0000:0000.0000'
+        :type dev_path: str
+
+        :return: The message
+        :rtype: str
+        """
+        return "Could not access {0}/device_type, file is not owned by plugdev".format(dev_path)
+
     @staticmethod
     def get_num_arguments(func):
         """

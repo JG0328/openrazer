@@ -485,7 +485,7 @@ class RazerDaemon(DBusService):
 
                     # Checking permissions
                     if not device_class.check_access(sys_path, self._test_dir is not None):
-                        self.logger.critical("Could not access {0}/device_type, file is not owned by plugdev".format(sys_path))
+                        self.logger.critical(device_class.access_denied_message(sys_path))
                         break
 
                     razer_device = device_class(device_path=sys_path, device_number=device_number, config=self._config,

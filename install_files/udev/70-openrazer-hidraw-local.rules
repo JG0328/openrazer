@@ -1,2 +1,3 @@
-# Barracuda X Chroma 2.4 GHz dongle (1532:0574): give the logged-in user access to its hidraw node
-KERNEL=="hidraw*", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0574", TAG+="uaccess"
+# Barracuda X Chroma 2.4 GHz dongle (1532:0574): access to its hidraw node for the plugdev group from the moment
+# the node is created (the daemon can start before logind applies the session ACL), and for the logged-in user
+KERNEL=="hidraw*", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0574", GROUP="plugdev", MODE="0660", TAG+="uaccess"

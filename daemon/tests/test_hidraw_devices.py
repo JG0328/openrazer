@@ -155,6 +155,39 @@ class HidrawDevicesTestCase(unittest.TestCase):
             with mock.patch('grp.getgrgid', return_value=('plugdev', 'x', other_gid, [])):
                 self.assertTrue(RazerDevice.check_access(dev_path, False))
 
+    def test_default_access_denied_message_is_unchanged(self):
+        self.assertEqual(RazerDevice.access_denied_message('/sys/bus/hid/devices/0003:1532:0084.0001'),
+                         'Could not access /sys/bus/hid/devices/0003:1532:0084.0001/device_type, file is not owned by plugdev')
+
+    def test_hidraw_access_denied_message_names_the_node_and_the_rule(self):
+        dev_path = make_sysfs_hid(self.root, '0003:1532:0574.0001', hidraw_name='hidraw900')
+        self.assertEqual(RazerBarracudaXChromaWireless.access_denied_message(dev_path),
+                         'Could not open /dev/hidraw900 for Razer Barracuda X Chroma (Wireless): '
+                         'check install_files/udev/70-openrazer-hidraw-local.rules (group plugdev / uaccess)')
+
+        # The node went away between match() and the check
+        no_hidraw = make_sysfs_hid(self.root, '0003:1532:0574.0002', hidraw_name=None)
+        self.assertEqual(RazerBarracudaXChromaWireless.access_denied_message(no_hidraw),
+                         'Could not find the hidraw node of {0} for Razer Barracuda X Chroma (Wireless)'.format(no_hidraw))
+
+    def test_load_devices_logs_the_class_access_message(self):
+        from openrazer_daemon.daemon import RazerDaemon
+
+        dev_path = make_sysfs_hid(self.root, '0003:1532:0574.0001')
+        device_class = mock.MagicMock()
+        device_class.match.return_value = True
+        device_class.check_access.return_value = False
+        device_class.access_denied_message.return_value = 'denied by the class'
+        daemon = mock.MagicMock(_test_dir=self.root, _device_classes=[device_class], _razer_devices=[])
+
+        RazerDaemon._load_devices(daemon)
+
+        device_class.check_access.assert_called_once_with(dev_path, True)
+        device_class.access_denied_message.assert_called_once_with(dev_path)
+        daemon.logger.critical.assert_called_once_with('denied by the class')
+        # Not built
+        device_class.assert_not_called()
+
     def test_passive_devices_publish_misc_surface(self):
         for cls, pid, sys_name, name, dev_type, serial in PASSIVE_DEVICES:
             with self.subTest(cls=cls.__name__):

@@ -104,6 +104,23 @@ class _RazerHidrawDevice(_RazerDevice):
 
         return node is not None and os.access(node, os.R_OK | os.W_OK)
 
+    @classmethod
+    def access_denied_message(cls, dev_path: str) -> str:
+        """
+        Message to log when check_access() refused the device: there is no device_type file, it is the hidraw node
+
+        :param dev_path: Device path
+        :type dev_path: str
+
+        :return: The message
+        :rtype: str
+        """
+        node = cls.hidraw_node(dev_path)
+        if node is None:
+            return "Could not find the hidraw node of {0} for {1}".format(dev_path, cls.HIDRAW_DEVICE_NAME)
+
+        return "Could not open {0} for {1}: check install_files/udev/70-openrazer-hidraw-local.rules (group plugdev / uaccess)".format(node, cls.HIDRAW_DEVICE_NAME)
+
     def get_serial(self):
         """
         Get the serial number, made up from the USB IDs because the device has no readable one
