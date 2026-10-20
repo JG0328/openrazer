@@ -188,6 +188,24 @@ class HidrawDevicesTestCase(unittest.TestCase):
         # Not built
         device_class.assert_not_called()
 
+    def test_add_device_ignores_udev_events_in_test_mode(self):
+        from openrazer_daemon.daemon import RazerDaemon
+
+        udev_device = mock.Mock(sys_name='0003:1532:0084.0001', sys_path='/sys/bus/hid/devices/0003:1532:0084.0001')
+        for test_dir, built in ((self.root, False), (None, True)):
+            with self.subTest(test_dir=test_dir):
+                # Kernel driver class or hidraw class alike
+                device_class = mock.MagicMock()
+                device_class.match.return_value = True
+                device_class.HIDRAW_DEVICE = False
+                daemon = mock.MagicMock(_test_dir=test_dir, _device_classes=[device_class], _razer_devices=[])
+
+                with mock.patch('time.sleep'), mock.patch('logging.warning'):
+                    RazerDaemon._add_device(daemon, udev_device)
+
+                self.assertEqual(device_class.called, built)
+                self.assertEqual(device_class.match.called, built)
+
     def test_passive_devices_publish_misc_surface(self):
         for cls, pid, sys_name, name, dev_type, serial in PASSIVE_DEVICES:
             with self.subTest(cls=cls.__name__):

@@ -518,16 +518,16 @@ class RazerDaemon(DBusService):
         :param device: Udev Device
         :type device: pyudev.device._device.Device
         """
+        # A daemon on a test directory must never drive the real devices that udev reports
+        if self._test_dir is not None:
+            return
+
         device_number = len(self._razer_devices)
         for device_class in self._device_classes:
             sys_name = device.sys_name
             sys_path = device.sys_path
 
             if sys_name in self._razer_devices:
-                continue
-
-            # Devices without a kernel driver are never faked from udev events in test mode
-            if self._test_dir is not None and device_class.HIDRAW_DEVICE:
                 continue
 
             if device_class.match(sys_name, sys_path):  # Check it matches sys/ ID format and has device_type file
