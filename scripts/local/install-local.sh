@@ -14,9 +14,13 @@
 #      then ask for confirmation
 #   3. udev rule (sudo), replacing the temporary 70-barracuda-probe.rules
 #   4. systemd user drop-in
-#   5. daemon reload + restart, then status and the end of razer.log
+#   5. ~/.local/bin/openrazer-daemon shim, so that Polychromatic's "Restart daemon" (which runs
+#      'openrazer-daemon -s', 'killall openrazer-daemon' and a bare 'openrazer-daemon') goes
+#      through the systemd unit instead of starting the packaged daemon outside systemd
+#   6. daemon reload + restart, then status and the end of razer.log
 #
-# Every step is idempotent: running the script again after a partial run is safe.
+# Before step 1 it checks that it would not overwrite an openrazer-daemon in ~/.local/bin that it
+# did not write. Every step is idempotent: running the script again after a partial run is safe.
 # Undo it with scripts/local/uninstall-local.sh.
 #
 # Usage: scripts/local/install-local.sh      (no arguments; asks for sudo and for confirmation)
@@ -32,6 +36,10 @@ PKG=/usr/lib/python3/dist-packages/openrazer_daemon
 DROPIN_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/openrazer-daemon.service.d
 DROPIN=$DROPIN_DIR/10-repo-daemon.conf
 PYCACHE=$HOME/.cache/openrazer-pycache
+SHIM_DIR=$HOME/.local/bin
+SHIM=$SHIM_DIR/openrazer-daemon
+# uninstall-local.sh only removes a shim that has this exact line
+SHIM_MARKER='# openrazer-hidraw-local shim'
 LOG=${XDG_DATA_HOME:-$HOME/.local/share}/openrazer/logs/razer.log
 
 die() {
@@ -44,20 +52,50 @@ step() {
     echo "=== $* ==="
 }
 
+# Print the shim. REPO is baked in; it was checked to have no character the shell would re-interpret
+write_shim() {
+    cat <<SHIM_EOF
+#!/bin/sh
+$SHIM_MARKER
+# Written by $REPO/scripts/local/install-local.sh, removed by scripts/local/uninstall-local.sh.
+# Starting, stopping and restarting go to the systemd user unit, which runs the repo daemon;
+# everything else (--version, -F, -v...) runs the repo daemon directly.
+if [ "\$#" -eq 0 ]; then
+    exec systemctl --user start openrazer-daemon
+fi
+if [ "\$#" -eq 1 ]; then
+    case \$1 in
+        -s | --stop) exec systemctl --user stop openrazer-daemon ;;
+        -r | --respawn) exec systemctl --user restart openrazer-daemon ;;
+    esac
+fi
+PYTHONPATH="$REPO/daemon" exec /usr/bin/python3 "$REPO/daemon/run_openrazer_daemon.py" "\$@"
+SHIM_EOF
+}
+
 [ "$(id -u)" -ne 0 ] || die "no ejecutar como root: el script pide sudo cuando lo necesita y usa el systemd del usuario"
 
-# The paths end up in a systemd unit (ExecStart=, Environment=): refuse what systemd would re-interpret
+# The paths end up in a systemd unit (ExecStart=, Environment=) and in the shim: refuse what systemd
+# or the shell would re-interpret
 for path in "$REPO" "$PYCACHE"; do
     case $path in
-        *[[:space:]%\$\"\'\\]*) die "la ruta $path tiene espacios o caracteres especiales de systemd; usa otra ruta" ;;
+        *[[:space:]%\$\"\'\\\`]*) die "la ruta $path tiene espacios o caracteres especiales de systemd o del shell; usa otra ruta" ;;
     esac
 done
 
+# Never overwrite an openrazer-daemon in ~/.local/bin that this script did not write
+if [ -e "$SHIM" ] || [ -L "$SHIM" ]; then
+    if ! grep -qxF -- "$SHIM_MARKER" "$SHIM" 2> /dev/null; then
+        die "ya existe $SHIM y no lo escribió este script (no tiene la línea '$SHIM_MARKER'); muévelo o bórralo a mano y vuelve a ejecutar. No se ha cambiado nada."
+    fi
+fi
+
 # --- 1. smoke test ------------------------------------------------------------------------------
 
-step "1/5 Prueba de humo en un bus D-Bus privado (scripts/local/smoke-hidraw.sh)"
+step "1/6 Prueba de humo en un bus D-Bus privado (scripts/local/smoke-hidraw.sh)"
 smoke_log=$(mktemp "${TMPDIR:-/tmp}/openrazer-install-smoke.XXXXXX")
-trap 'rm -f "$smoke_log"' EXIT
+shim_tmp=''
+trap 'rm -f "$smoke_log" ${shim_tmp:+"$shim_tmp"}' EXIT
 if ! bash scripts/local/smoke-hidraw.sh 2>&1 | tee "$smoke_log"; then
     die "la prueba de humo falló; no se instala nada"
 fi
@@ -67,7 +105,7 @@ fi
 
 # --- 2. read-only check of the devices that already work -----------------------------------------
 
-step "2/5 Comprobación previa de los dispositivos que ya funcionan (solo lectura: paquete instalado frente al repo)"
+step "2/6 Comprobación previa de los dispositivos que ya funcionan (solo lectura: paquete instalado frente al repo)"
 dpkg-query -W -f='Paquete instalado: ${Package} ${Version}\n' openrazer-daemon 2> /dev/null || true
 
 if [ -d "$PKG" ]; then
@@ -108,7 +146,7 @@ esac
 
 # --- 3. udev rule -------------------------------------------------------------------------------
 
-step "3/5 Regla udev (sudo)"
+step "3/6 Regla udev (sudo)"
 echo "+ sudo install -m 644 install_files/udev/$RULE_NAME /etc/udev/rules.d/"
 sudo install -m 644 "install_files/udev/$RULE_NAME" /etc/udev/rules.d/
 echo "+ sudo rm -f $PROBE_RULE"
@@ -119,7 +157,7 @@ sudo udevadm trigger --subsystem-match=hidraw
 
 # --- 4. systemd user drop-in --------------------------------------------------------------------
 
-step "4/5 Drop-in de systemd (usuario): $DROPIN"
+step "4/6 Drop-in de systemd (usuario): $DROPIN"
 mkdir -p "$DROPIN_DIR"
 cat > "$DROPIN" <<DROPIN_EOF
 [Service]
@@ -131,9 +169,24 @@ DROPIN_EOF
 echo "Escrito:"
 cat "$DROPIN"
 
-# --- 5. restart the daemon ----------------------------------------------------------------------
+# --- 5. openrazer-daemon shim -------------------------------------------------------------------
 
-step "5/5 Recarga y reinicio del daemon"
+step "5/6 Lanzador $SHIM (para 'Reiniciar daemon' de Polychromatic)"
+mkdir -p "$SHIM_DIR"
+shim_tmp=$(mktemp "$SHIM_DIR/.openrazer-daemon.XXXXXX")
+write_shim > "$shim_tmp"
+chmod 755 "$shim_tmp"
+mv -f "$shim_tmp" "$SHIM"
+echo "Escrito:"
+cat "$SHIM"
+if [ "$(command -v openrazer-daemon || true)" != "$SHIM" ]; then
+    echo "AVISO: en este PATH 'openrazer-daemon' no es $SHIM sino '$(command -v openrazer-daemon || true)'." >&2
+    echo "       ~/.profile solo añade ~/.local/bin al PATH si la carpeta existía al iniciar sesión." >&2
+fi
+
+# --- 6. restart the daemon ----------------------------------------------------------------------
+
+step "6/6 Recarga y reinicio del daemon"
 echo "+ systemctl --user daemon-reload && systemctl --user restart openrazer-daemon"
 systemctl --user daemon-reload
 restart_rc=0
