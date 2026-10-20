@@ -22,6 +22,9 @@ BLUE = build_color(0, 0, 255)
 # What the device reads every time the link comes up, in this order
 SYNC_GETS = [build_get(0x20), build_get(0x21), build_get(0x2A), build_get(0x2C), build_get(0x41)]
 
+# What write_sentinel() writes: idle time 300 s, i.e. 5 minutes
+SENTINEL = build_set(0x2C, 5)
+
 
 def is_color(frame):
     return frame[7:9] == b'\x0f\x03'
@@ -70,6 +73,14 @@ class BarracudaWirelessTestCase(unittest.TestCase):
     def wait_last_write(self, dongle, frame):
         self.wait_until(lambda: dongle.writes[-1:] == [frame], 'last frame ' + frame.hex())
 
+    def write_sentinel(self, dev, dongle, start):
+        """
+        Write a known frame and wait for it. Frames travel in order over one socket, so
+        once it arrived everything written before it arrived too
+        """
+        dev.setIdleTime(300)
+        self.wait_for_write(dongle, SENTINEL, start)
+
     def link_cycle(self, dev, dongle):
         """Turn the headset off and on, wait until the sync that follows finished, return the index of its first write"""
         start = len(dongle.writes)
@@ -89,17 +100,16 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         self.wait_until(lambda: dev.getBrightness() == 32.9, 'brightness 32.9')
         self.wait_for_sync(dev)
 
-        # The getters never talk to the device: the frame written next is the next one the dongle sees
+        # The getters never talk to the device: the sentinel is the next frame the dongle sees
         for _ in range(3):
             dev.getBattery()
             dev.isCharging()
             dev.getIdleTime()
             dev.getBrightness()
-        dev.setIdleTime(300)
-        self.wait_for_write(dongle, build_set(0x2C, 5), len(SYNC_GETS))
+        self.write_sentinel(dev, dongle, len(SYNC_GETS))
 
         # Only reads at startup: no brightness SET, and no colour since nothing was chosen yet
-        self.assertEqual(dongle.writes, SYNC_GETS + [build_set(0x2C, 5)])
+        self.assertEqual(dongle.writes, SYNC_GETS + [SENTINEL])
         self.assertEqual([f for f in dongle.writes if is_set_brightness(f)], [])
         self.assertFalse(dev.persistence.status['changed'])
 
@@ -190,6 +200,31 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         # Brightness is not synced to other devices
         observer.notify.assert_not_called()
 
+    def test_pending_brightness_applied_on_link_up(self):
+        dev, dongle = self.make_synced()
+        dongle.emit_event(0x20, 0)
+        self.wait_until(lambda: not dev._link, 'link down')
+        start = len(dongle.writes)
+
+        dev.setBrightness(50)
+        self.assertEqual(dev.getBrightness(), 50.0)
+        dongle.emit_event(0x20, 1)
+        self.wait_for_write(dongle, build_set(0x41, 128), start)
+        self.wait_for_sync(dev)
+
+        # José's value wins over the 84 the headset still had when it was read
+        self.assertEqual(dev.getBrightness(), 50.0)
+        self.assertEqual(dongle.props[0x41], 128)
+        # Nothing went out while the link was down, and the change is written once
+        self.write_sentinel(dev, dongle, start)
+        self.assertEqual(dongle.writes[start:], SYNC_GETS + [build_set(0x41, 128), SENTINEL])
+
+        # The next link up only reads it again
+        start = self.link_cycle(dev, dongle)
+        self.write_sentinel(dev, dongle, start)
+        self.assertEqual(dongle.writes[start:], SYNC_GETS + [SENTINEL])
+        self.assertEqual(dev.getBrightness(), 50.2)
+
     def test_idle_time_conversion(self):
         dev, dongle = self.make_synced()
 
@@ -211,6 +246,7 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         self.wait_last_write(dongle, BLUE)
 
         start = self.link_cycle(dev, dongle)
+        self.wait_for_write(dongle, BLUE, start)
 
         self.assertEqual(dongle.writes[-1], BLUE)
         # Reads, then the colour once; the brightness stays as the headset saved it
@@ -221,8 +257,9 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         self.assertEqual(dev.getEffect(), 'spectrum')
 
         start = self.link_cycle(dev, dongle)
+        self.write_sentinel(dev, dongle, start)
 
-        self.assertEqual(dongle.writes[start:], SYNC_GETS)
+        self.assertEqual(dongle.writes[start:], SYNC_GETS + [SENTINEL])
         self.assertEqual([f for f in dongle.writes if is_color(f)], [])
 
     def test_link_up_while_suspended_sends_black(self):
@@ -234,6 +271,7 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         self.wait_last_write(dongle, BLACK)
 
         start = self.link_cycle(dev, dongle)
+        self.wait_for_write(dongle, BLACK, start)
         self.assertEqual([f for f in dongle.writes[start:] if is_color(f)], [BLACK])
 
         dev.resume_device()
@@ -244,18 +282,36 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         # The screen lock never touches the brightness saved in the headset
         self.assertEqual([f for f in dongle.writes if is_set_brightness(f)], [])
 
+    def test_lock_without_user_choice_leaves_the_headset_alone(self):
+        # Nothing chosen yet: the headset shows its own wave, which cannot be restored
+        # once overwritten, so the screen lock must not write black
+        dev, dongle = self.make_synced()
+        self.assertEqual(dev.getEffect(), 'spectrum')
+        start = len(dongle.writes)
+
+        dev.suspend_device()
+        self.assertTrue(dev._lights_suspended)
+        self.link_cycle(dev, dongle)
+        dev.resume_device()
+        self.assertFalse(dev._lights_suspended)
+
+        self.write_sentinel(dev, dongle, start)
+        self.assertEqual(dongle.writes[start:], SYNC_GETS + [SENTINEL])
+        self.assertEqual([f for f in dongle.writes if is_color(f)], [])
+
     def test_set_static_while_suspended_waits_for_resume(self):
         dev, dongle = self.make_synced()
+        dev.setStatic(0, 0, 255)
+        self.wait_last_write(dongle, BLUE)
         dev.suspend_device()
         self.wait_last_write(dongle, BLACK)
         start = len(dongle.writes)
 
         dev.setStatic(255, 0, 0)
         self.assertEqual(dev.getEffect(), 'static')
-        # Nothing was written: the next frame is the first one the dongle sees
-        dev.setIdleTime(300)
-        self.wait_for_write(dongle, build_set(0x2C, 5), start)
-        self.assertEqual(dongle.writes[start:], [build_set(0x2C, 5)])
+        # Nothing was written: the sentinel is the first frame the dongle sees
+        self.write_sentinel(dev, dongle, start)
+        self.assertEqual(dongle.writes[start:], [SENTINEL])
 
         dev.resume_device()
         self.wait_last_write(dongle, build_color(255, 0, 0))
@@ -273,10 +329,9 @@ class BarracudaWirelessTestCase(unittest.TestCase):
 
         self.assertEqual(dev.getBrightness(), brightness)
         self.assertFalse(dev.persistence.status['changed'])
-        # Nothing was written: the next frame is the first one the dongle sees
-        dev.setIdleTime(300)
-        self.wait_for_write(dongle, build_set(0x2C, 5), start)
-        self.assertEqual(dongle.writes[start:], [build_set(0x2C, 5)])
+        # Nothing was written: the sentinel is the first frame the dongle sees
+        self.write_sentinel(dev, dongle, start)
+        self.assertEqual(dongle.writes[start:], [SENTINEL])
 
     def test_synced_static_and_none_are_applied(self):
         dev, dongle = self.make_synced()
@@ -299,11 +354,13 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         dongle.emit_event(0x20, 1)
         self.wait_for_write(dongle, build_set(0x2C, 10), start)
 
-        # Nothing went out while the link was down: the reads of the sync come first
-        self.assertEqual(dongle.writes[start:], SYNC_GETS + [build_set(0x2C, 10)])
         self.wait_for_sync(dev)
         self.assertEqual(dev.getIdleTime(), 600)
         self.assertEqual(dongle.props[0x2C], 10)
+
+        # Nothing went out while the link was down: the reads of the sync come first
+        self.write_sentinel(dev, dongle, start)
+        self.assertEqual(dongle.writes[start:], SYNC_GETS + [build_set(0x2C, 10), SENTINEL])
 
     def test_construct_with_silent_dongle_is_fast_and_safe(self):
         started = time.monotonic()

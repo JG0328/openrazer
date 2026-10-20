@@ -191,7 +191,8 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
     Every time the link comes up (and once at startup) a sync thread reads the state
     and applies again the lighting chosen in the daemon, because the headset does not
     keep its colour when it is turned off. Brightness and idle time are saved in the
-    headset itself, so they are only written when they are changed.
+    headset itself, so they are only written when they are changed; a change made
+    while the headset is off is written at the next link up.
 
     Threading: _state_lock protects the cached state and self.zone; it is never held
     while writing or waiting for the device. _write_lock makes "decide what to write,
@@ -215,6 +216,7 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
         self._charging = False
         self._idle_minutes = None  # type: Optional[int]
         self._pending_idle_minutes = None  # type: Optional[int]
+        self._pending_brightness = None  # type: Optional[int]
         self._lights_suspended = False
         self._sync_thread = None  # type: Optional[threading.Thread]
         self._sync_again = False
@@ -407,7 +409,8 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
         Set the brightness, which the headset saves itself
 
         Brightness changes that effect sync brings from other devices are ignored, so
-        that changing another device does not change what the headset saved.
+        that changing another device does not change what the headset saved. Without
+        link the value is kept and written when the link comes up.
 
         :param brightness: Brightness 0..100
         :type brightness: float
@@ -418,13 +421,26 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
             return
 
         brightness = float(min(100, max(0, brightness)))
+        value = int(round(brightness * 255 / 100))
 
-        with self._state_lock:
-            self.set_persistence('backlight', 'brightness', brightness)
-            send = self._linked()
+        with self._write_lock:
+            with self._state_lock:
+                self.set_persistence('backlight', 'brightness', brightness)
+                linked = self._linked()
+                if not linked:
+                    self._pending_brightness = value
 
-        if send:
-            self._transport.write(_protocol.build_set(_protocol.PROP_BRIGHTNESS, int(round(brightness * 255 / 100))))
+            if linked:
+                self._write_brightness(value)
+
+    def _write_brightness(self, value: int) -> None:
+        """Write the brightness (0..255), keep it pending if that fails. Call with _write_lock held"""
+        if self._transport.write(_protocol.build_set(_protocol.PROP_BRIGHTNESS, value)):
+            with self._state_lock:
+                self._pending_brightness = None
+        else:
+            with self._state_lock:
+                self._pending_brightness = value
 
     def _on_report(self, data: bytes) -> None:
         """
@@ -526,8 +542,9 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
                     self._charging = bool(value)
                 elif prop == _protocol.PROP_IDLE_MINUTES:
                     self._idle_minutes = value
-                else:
-                    # The headset keeps its brightness, only show it
+                elif self._pending_brightness is None:
+                    # The headset keeps its brightness, only show it. A pending change
+                    # made while it was off wins, it is written below
                     self.zone['backlight']['brightness'] = round(value * 100 / 255, 1)
 
         with self._write_lock:
@@ -535,6 +552,11 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
                 pending = self._pending_idle_minutes if self._linked() else None
             if pending is not None:
                 self._write_idle_minutes(pending)
+
+            with self._state_lock:
+                pending = self._pending_brightness if self._linked() else None
+            if pending is not None:
+                self._write_brightness(pending)
 
             with self._state_lock:
                 frame = self._lighting_frame() if self._linked() else None
@@ -545,28 +567,34 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
         """
         Frame that shows the current lighting. Call with _state_lock held
 
-        :return: The frame, None if the daemon has nothing to show (so the headset keeps its own wave)
+        Black while suspended or off, the colour if static. None if nothing was chosen
+        yet, even while suspended: the headset then shows its own wave, and that could
+        not be put back after a black frame.
+
+        :return: The frame, None if the daemon has nothing to show
         :rtype: bytes or None
         """
         effect = self.zone['backlight']['effect']
 
+        if effect not in ('static', 'none'):
+            return None
         if self._lights_suspended or effect == 'none':
             return _protocol.build_color(0, 0, 0)
-        if effect == 'static':
-            return _protocol.build_color(*self.zone['backlight']['colors'][0:3])
-        return None
+        return _protocol.build_color(*self.zone['backlight']['colors'][0:3])
 
     def _suspend_device(self):
         """
         Screen locked: black, without touching the chosen lighting or the saved brightness
+
+        Only over a lighting chosen in the daemon, see _lighting_frame.
         """
         with self._write_lock:
             with self._state_lock:
                 self._lights_suspended = True
-                send = self._linked()
+                frame = self._lighting_frame() if self._linked() else None
 
-            if send:
-                self._transport.write(_protocol.build_color(0, 0, 0))
+            if frame is not None:
+                self._transport.write(frame)
 
     def _resume_device(self):
         """
