@@ -67,15 +67,17 @@ class FakeDongle(object):
 
     Attributes the tests read:
         props: property id (the GET id) -> value; SET frames update it
+        silent_props: GET ids that are never answered, as if the reply got lost
         writes: every frame received, in order
         rejected: the received frames that check_frame refused
         log_file: if set to a text file, one hex line is written to it per received frame
     """
     DEFAULT_PROPS = {0x20: 1, 0x21: 79, 0x2A: 0, 0x2C: 5, 0x41: 84}
 
-    def __init__(self, props: Optional[dict] = None, silent: bool = False):
+    def __init__(self, props: Optional[dict] = None, silent: bool = False, silent_props=()):
         self.props = dict(self.DEFAULT_PROPS if props is None else props)
         self.silent = silent
+        self.silent_props = set(silent_props)
         self.writes = []  # type: list
         self.rejected = []  # type: list
         self.log_file = None  # type: Optional[TextIO]
@@ -202,7 +204,7 @@ class FakeDongle(object):
             if prop & 0x80:
                 self.props[prop & 0x7F] = frame[13]
                 value = 0x00
-            elif prop in self.props:
+            elif prop in self.props and prop not in self.silent_props:
                 value = self.props[prop]
             else:
                 return None

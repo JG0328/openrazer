@@ -16,6 +16,9 @@ from hidraw_fixtures import build_device, make_sysfs_hid
 
 TIMEOUT = 2.0
 
+# How long the device waits for the reply to a GET (HidrawTransport.request)
+REPLY_TIMEOUT = 1.5
+
 BLACK = build_color(0, 0, 0)
 BLUE = build_color(0, 0, 255)
 
@@ -43,8 +46,8 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         for dongle in self.dongles:
             self.assertEqual(dongle.rejected, [])
 
-    def wait_until(self, predicate, what):
-        deadline = time.monotonic() + TIMEOUT
+    def wait_until(self, predicate, what, timeout=TIMEOUT):
+        deadline = time.monotonic() + timeout
         while not predicate():
             if time.monotonic() > deadline:
                 self.fail('timed out waiting for ' + what)
@@ -67,8 +70,8 @@ class BarracudaWirelessTestCase(unittest.TestCase):
     def wait_for_sync(self, dev):
         self.wait_until(lambda: dev._sync_thread is None, 'the sync to finish')
 
-    def wait_for_write(self, dongle, frame, start=0):
-        self.wait_until(lambda: frame in dongle.writes[start:], 'frame ' + frame.hex())
+    def wait_for_write(self, dongle, frame, start=0, timeout=TIMEOUT):
+        self.wait_until(lambda: frame in dongle.writes[start:], 'frame ' + frame.hex(), timeout)
 
     def wait_last_write(self, dongle, frame):
         self.wait_until(lambda: dongle.writes[-1:] == [frame], 'last frame ' + frame.hex())
@@ -148,6 +151,28 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         self.wait_for_write(dongle, build_get(0x2A), start)
         self.assertTrue(dev._link)
         self.assertIs(dev.isCharging(), False)
+
+    def test_lost_link_reply_does_not_cancel_a_link_event(self):
+        dev, dongle = self.make_synced()
+        dev.setStatic(0, 0, 255)
+        self.wait_last_write(dongle, BLUE)
+        dongle.emit_event(0x20, 0)
+        self.wait_until(lambda: not dev._link, 'link down')
+
+        # The headset says the link is up, but the reply to the GET 0x20 that follows is lost
+        dongle.silent_props.add(0x20)
+        start = len(dongle.writes)
+        dongle.emit_event(0x20, 1)
+
+        # The GET waits for its whole timeout, then the sync goes on and applies the colour
+        self.wait_for_write(dongle, BLUE, start, REPLY_TIMEOUT + TIMEOUT)
+        self.wait_for_sync(dev)
+        self.assertTrue(dev._link)
+        self.assertEqual(dongle.writes[start:], SYNC_GETS + [BLUE])
+
+        # And the setters still write
+        dev.setStatic(255, 0, 0)
+        self.wait_last_write(dongle, build_color(255, 0, 0))
 
     def test_set_static_writes_color_and_persists(self):
         dev, dongle = self.make_synced()

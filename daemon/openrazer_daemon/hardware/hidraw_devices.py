@@ -477,11 +477,11 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
             elif report.prop == _protocol.PROP_CHARGING:
                 self._charging = bool(report.value)
             elif report.prop == _protocol.PROP_LINK:
-                self._link = report.value == 1
-                if self._link:
+                if report.value == 1:
+                    self._link = True
                     link_up = True
                 else:
-                    self._charging = False
+                    self._link_down()
 
         if report.prop == _protocol.PROP_LINK:
             self.logger.info("Headset link %s", 'up' if link_up else 'down')
@@ -491,8 +491,12 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
     def _on_disconnect(self) -> None:
         """The dongle went away (reader thread)"""
         with self._state_lock:
-            self._link = False
-            self._charging = False
+            self._link_down()
+
+    def _link_down(self) -> None:
+        """The headset is off, on Bluetooth or unreachable. Call with _state_lock held"""
+        self._link = False
+        self._charging = False
 
     def _request_sync(self) -> None:
         """Run _sync in its own thread, or once more after the one that is running"""
@@ -536,15 +540,24 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
         return report.value
 
     def _sync(self) -> None:
-        """Read the state of the headset into the cache and apply the lighting again (sync thread)"""
-        if self._get(_protocol.PROP_LINK) != 1:
-            with self._state_lock:
-                self._link = False
+        """
+        Read the state of the headset into the cache and apply the lighting again (sync thread)
+
+        Only a reply changes what is known, a GET without one keeps the cached value. So a
+        lost reply to GET 0x20 does not cancel a link up announced by an event, while at
+        startup (link not known yet) a silent dongle still means that nothing is written.
+        """
+        link = self._get(_protocol.PROP_LINK)
+        with self._state_lock:
+            if link == 1:
+                self._link = True
+            elif link is not None:
+                self._link_down()
+            linked = self._link
+
+        if not linked:
             self.logger.debug("Headset not linked")
             return
-
-        with self._state_lock:
-            self._link = True
 
         for prop in (_protocol.PROP_BATTERY, _protocol.PROP_CHARGING, _protocol.PROP_IDLE_MINUTES, _protocol.PROP_BRIGHTNESS):
             value = self._get(prop)
