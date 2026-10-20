@@ -8,7 +8,7 @@ from unittest import mock
 
 import openrazer_daemon.hardware
 from openrazer_daemon.hardware.device_base import RazerDevice
-from openrazer_daemon.hardware.hidraw_devices import _RazerHidrawDevice, RazerBarracudaXChromaWired, RazerSeirenV3Mini
+from openrazer_daemon.hardware.hidraw_devices import _RazerHidrawDevice, RazerBarracudaXChromaWired, RazerBarracudaXChromaWireless, RazerSeirenV3Mini
 
 from hidraw_fixtures import build_device, make_sysfs_hid
 
@@ -58,9 +58,15 @@ class HidrawDevicesTestCase(unittest.TestCase):
     def test_match_uses_the_class_product_id(self):
         sys_name = '0003:1532:0574.0015'
         dev_path = make_sysfs_hid(self.root, sys_name)
+        self.assertTrue(RazerBarracudaXChromaWireless.match(sys_name, dev_path))
         for cls in (RazerBarracudaXChromaWired, RazerSeirenV3Mini):
             with self.subTest(cls=cls.__name__):
                 self.assertFalse(cls.match(sys_name, dev_path))
+
+        # And the other way round
+        for other in ('0003:1532:0573.0016', '0003:1532:056A.0017'):
+            with self.subTest(other=other):
+                self.assertFalse(RazerBarracudaXChromaWireless.match(other, make_sysfs_hid(self.root, other)))
 
     def test_match_requires_upper_case_hex_for_seiren(self):
         dev_path = make_sysfs_hid(self.root, '0003:1532:056A.0003')
@@ -201,11 +207,13 @@ class HidrawDevicesTestCase(unittest.TestCase):
     def test_classes_registered(self):
         names = [cls.__name__ for cls in openrazer_daemon.hardware.get_device_classes()]
         self.assertIn('RazerBarracudaXChromaWired', names)
+        self.assertIn('RazerBarracudaXChromaWireless', names)
         self.assertIn('RazerSeirenV3Mini', names)
         self.assertNotIn('_RazerHidrawDevice', names)
 
         classes = openrazer_daemon.hardware.get_device_classes()
         self.assertIn(RazerBarracudaXChromaWired, classes)
+        self.assertIn(RazerBarracudaXChromaWireless, classes)
         self.assertIn(RazerSeirenV3Mini, classes)
         self.assertNotIn(_RazerHidrawDevice, classes)
         self.assertNotIn(RazerDevice, classes)
