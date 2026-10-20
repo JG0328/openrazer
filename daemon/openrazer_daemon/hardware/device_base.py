@@ -4,6 +4,7 @@
 Hardware base class
 """
 import configparser
+import grp
 import re
 import os
 import types
@@ -41,6 +42,7 @@ class RazerDevice(DBusService):
     POLL_RATES: Optional[list[int]] = None
     DPI_MAX: Optional[int] = None
     DRIVER_MODE = False
+    HIDRAW_DEVICE = False
 
     WAVE_DIRS = (1, 2)
 
@@ -1311,6 +1313,26 @@ class RazerDevice(DBusService):
                 return True
 
         return False
+
+    @classmethod
+    def check_access(cls, dev_path, testing):
+        """
+        Check that the daemon is allowed to use the device
+
+        :param dev_path: Device path. Normally '/sys/bus/hid/devices/0000:0000:0000.0000'
+        :type dev_path: str
+
+        :param testing: True when the daemon runs against a test directory
+        :type testing: bool
+
+        :return: True if the device_type file belongs to the daemon's group or to plugdev
+        :rtype: bool
+        """
+        test_file = os.path.join(dev_path, 'device_type')
+        file_group_id = os.stat(test_file).st_gid
+        file_group_name = grp.getgrgid(file_group_id)[0]
+
+        return os.getgid() == file_group_id or file_group_name == 'plugdev'
 
     @staticmethod
     def get_num_arguments(func):
