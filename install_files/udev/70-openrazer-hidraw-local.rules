@@ -1,0 +1,2 @@
+# Barracuda X Chroma 2.4 GHz dongle (1532:0574): give the logged-in user access to its hidraw node
+KERNEL=="hidraw*", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0574", TAG+="uaccess"
