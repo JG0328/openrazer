@@ -211,11 +211,12 @@ class FakeDongle(object):
         return _device_report(barracuda_protocol.STATUS_OK, 0x00, prop, 0x01, value)
 
 
-def make_wireless(case, dongle: FakeDongle):
+def make_wireless(case, dongle: FakeDongle, config=None):
     """
     Build a RazerBarracudaXChromaWireless that talks to dongle, without D-Bus.
 
     The device, the dongle and the fake sysfs directory are cleaned up with case.addCleanup.
+    config is the daemon configuration, hidraw_fixtures.make_config() if None.
     """
     # Imported here so that the standalone dongle does not need the daemon's D-Bus side
     from openrazer_daemon.hardware.hidraw_devices import RazerBarracudaXChromaWireless
@@ -232,7 +233,7 @@ def make_wireless(case, dongle: FakeDongle):
     dongle.listen_abstract(name)
     case.addCleanup(dongle.close)
 
-    device = build_device(RazerBarracudaXChromaWireless, dev_path)
+    device = build_device(RazerBarracudaXChromaWireless, dev_path, config)
     case.addCleanup(device.close)
     return device
 

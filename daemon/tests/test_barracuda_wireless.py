@@ -10,9 +10,10 @@ from unittest import mock
 
 from openrazer_daemon.hardware.hidraw_devices import RazerBarracudaXChromaWireless
 from openrazer_daemon.misc.barracuda_protocol import build_color, build_get, build_set, check_frame
+from openrazer_daemon.misc.battery_notifier import BatteryNotifier
 
 from fake_hidraw import FakeDongle, make_wireless
-from hidraw_fixtures import build_device, make_sysfs_hid
+from hidraw_fixtures import build_device, make_config, make_sysfs_hid
 
 TIMEOUT = 2.0
 
@@ -53,12 +54,12 @@ class BarracudaWirelessTestCase(unittest.TestCase):
                 self.fail('timed out waiting for ' + what)
             time.sleep(0.01)
 
-    def make(self, dongle=None):
+    def make(self, dongle=None, config=None):
         """Build the device on a fake dongle, return both"""
         if dongle is None:
             dongle = FakeDongle()
         self.dongles.append(dongle)
-        return make_wireless(self, dongle), dongle
+        return make_wireless(self, dongle, config), dongle
 
     def make_synced(self, dongle=None):
         """Build the device and wait until the sync done at construction finished"""
@@ -83,6 +84,21 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         """
         dev.setIdleTime(300)
         self.wait_for_write(dongle, SENTINEL, start)
+
+    def notifier_config(self):
+        """José's configuration: battery notifications every 600 s at 33 % or less"""
+        config = make_config()
+        config['Startup']['battery_notifier'] = 'True'
+        config['Startup']['battery_notifier_freq'] = '600'
+        config['Startup']['battery_notifier_percent'] = '33'
+        return config
+
+    def patch_notifications(self):
+        """Replace the desktop notification. Call before make(): the device is closed before the patch ends"""
+        patcher = mock.patch.object(BatteryNotifier, 'show_notification')
+        show = patcher.start()
+        self.addCleanup(patcher.stop)
+        return show
 
     def link_cycle(self, dev, dongle):
         """Turn the headset off and on, wait until the sync that follows finished, return the index of its first write"""
@@ -173,6 +189,75 @@ class BarracudaWirelessTestCase(unittest.TestCase):
         # And the setters still write
         dev.setStatic(255, 0, 0)
         self.wait_last_write(dongle, build_color(255, 0, 0))
+
+    def test_battery_notifier_only_runs_while_linked(self):
+        show = self.patch_notifications()
+        dev, dongle = self.make(FakeDongle(props={0x20: 0, 0x21: 20, 0x2A: 0, 0x2C: 5, 0x41: 84}), self.notifier_config())
+        self.wait_for_sync(dev)
+        # An explicit "not linked" reply ends the sync at once
+        self.assertEqual(dongle.writes, [build_get(0x20)])
+        self.assertFalse(dev._battery_manager.active)
+
+        # A level heard while the link is down is the last known one for D-Bus, never a notification
+        dongle.emit_event(0x21, 20)
+        self.wait_until(lambda: dev.getBattery() == 20.0, 'battery 20')
+        time.sleep(0.3)  # a few rounds of the notifier thread
+        self.assertFalse(dev._battery_manager.active)
+        show.assert_not_called()
+
+        # Linked, the sync reads the level and the notifier warns about it
+        dongle.emit_event(0x20, 1)
+        self.wait_until(lambda: show.called, 'the low battery notification')
+        show.assert_called_once_with(summary='Razer Barracuda X Chroma (Wireless)', message='Battery is 20%', icon='battery-low')
+
+        # Link down: off at once, and closing does not wait for the notifier
+        dongle.emit_event(0x20, 0)
+        self.wait_until(lambda: not dev._battery_manager.active, 'the notifier to stop')
+        started = time.monotonic()
+        dev.close()
+        self.assertLess(time.monotonic() - started, 1.0)
+        show.assert_called_once()
+
+    def test_battery_notifier_waits_for_a_level_read_on_the_link(self):
+        show = self.patch_notifications()
+        dev, dongle = self.make(FakeDongle(props={0x20: 1, 0x21: 20, 0x2A: 0, 0x2C: 5, 0x41: 84}), self.notifier_config())
+        self.wait_until(lambda: show.called, 'the low battery notification')
+        self.assertTrue(dev._battery_manager.active)
+        dongle.emit_event(0x20, 0)
+        self.wait_until(lambda: not dev._battery_manager.active, 'the notifier to stop')
+
+        # Back on the link, the reply to GET 0x21 gets lost: the level of the last link is not trusted
+        dongle.silent_props.add(0x21)
+        start = len(dongle.writes)
+        dongle.emit_event(0x20, 1)
+        self.wait_for_write(dongle, build_get(0x41), start, REPLY_TIMEOUT + TIMEOUT)
+        self.wait_for_sync(dev)
+        self.assertTrue(dev._link)
+        self.assertEqual(dev.getBattery(), 20.0)
+        self.assertFalse(dev._battery_manager.active)
+
+        # A battery event on the link is a fresh level
+        dongle.emit_event(0x21, 25)
+        self.wait_until(lambda: dev._battery_manager.active, 'the notifier to start')
+        self.assertEqual(dev.getBattery(), 25.0)
+
+    def test_battery_notifier_stays_off_while_nothing_is_known(self):
+        show = self.patch_notifications()
+        dev, dongle = self.make(FakeDongle(silent=True), self.notifier_config())
+
+        time.sleep(0.3)  # a few rounds of the notifier thread
+        self.assertFalse(dev._battery_manager.active)
+        # No 10-s retry on the unknown level, so closing is quick
+        started = time.monotonic()
+        dev.close()
+        self.assertLess(time.monotonic() - started, 1.0)
+        show.assert_not_called()
+
+    def test_battery_notifier_respects_the_configuration(self):
+        dev, dongle = self.make_synced()  # battery_notifier = False
+        self.assertFalse(dev._battery_manager.active)
+        self.link_cycle(dev, dongle)
+        self.assertFalse(dev._battery_manager.active)
 
     def test_set_static_writes_color_and_persists(self):
         dev, dongle = self.make_synced()

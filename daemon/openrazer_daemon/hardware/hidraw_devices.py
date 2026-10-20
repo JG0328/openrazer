@@ -21,6 +21,7 @@ from typing import Optional
 from openrazer_daemon.hardware.device_base import RazerDevice as _RazerDevice
 from openrazer_daemon.misc import barracuda_protocol as _protocol
 from openrazer_daemon.misc import hidraw_transport as _hidraw_transport
+from openrazer_daemon.misc.battery_notifier import BatteryManager as _BatteryManager
 
 
 class _RazerHidrawDevice(_RazerDevice):
@@ -240,6 +241,7 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
         self._closing = False
         self._write_lock = threading.Lock()
         self._transport = None  # type: Optional[_hidraw_transport.HidrawTransport]
+        self._notify_battery = False
 
         super().__init__(*args, **kwargs)
 
@@ -253,6 +255,29 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
         self._transport = _hidraw_transport.HidrawTransport(fd, self._on_report, self._on_disconnect, _protocol.check_frame, self.logger)
         self._transport.start()
         self._request_sync()
+
+    def _init_battery_manager(self):
+        """
+        Start the battery notifier switched off
+
+        The notifier only knows getBattery, which keeps giving D-Bus clients the last known
+        level while the headset is off or on Bluetooth. Left on, it would warn about that
+        stale level every battery_notifier_freq seconds, or retry every 10 s while the level
+        is unknown (which also stalls close()). So it runs only while the link is up and the
+        level was read on that link, switched through BatteryManager.active (a
+        threading.Event, safe from any thread); battery_notifier only says whether it may run.
+        This copies the base method instead of calling it, because the base switches the
+        notifier on before it could be switched off here, and it may already have run once.
+        """
+        self._notify_battery = self.config.getboolean('Startup', 'battery_notifier', fallback=False)
+        self._battery_manager = _BatteryManager(self, self._device_number, self.getDeviceName())  # pylint: disable=no-member
+        self._battery_manager.frequency = self.config.getint('Startup', 'battery_notifier_freq', fallback=10 * 60)
+        self._battery_manager.percent = self.config.getint('Startup', 'battery_notifier_percent', fallback=33)
+
+    def _battery_read_on_link(self) -> None:
+        """A fresh battery level was cached. Call with _state_lock held"""
+        if self._link and self._notify_battery and self._battery_manager is not None:
+            self._battery_manager.active = True
 
     def _open_fd(self) -> int:
         """
@@ -474,6 +499,7 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
         with self._state_lock:
             if report.prop == _protocol.PROP_BATTERY:
                 self._battery = min(report.value, 100)
+                self._battery_read_on_link()
             elif report.prop == _protocol.PROP_CHARGING:
                 self._charging = bool(report.value)
             elif report.prop == _protocol.PROP_LINK:
@@ -497,6 +523,9 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
         """The headset is off, on Bluetooth or unreachable. Call with _state_lock held"""
         self._link = False
         self._charging = False
+        # The cached level is stale from now on, see _init_battery_manager
+        if self._battery_manager is not None:
+            self._battery_manager.active = False
 
     def _request_sync(self) -> None:
         """Run _sync in its own thread, or once more after the one that is running"""
@@ -568,6 +597,7 @@ class RazerBarracudaXChromaWireless(_RazerHidrawDevice):
                         return
                 elif prop == _protocol.PROP_BATTERY:
                     self._battery = min(value, 100)
+                    self._battery_read_on_link()
                 elif prop == _protocol.PROP_CHARGING:
                     self._charging = bool(value)
                 elif prop == _protocol.PROP_IDLE_MINUTES:

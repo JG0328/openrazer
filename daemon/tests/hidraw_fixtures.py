@@ -56,14 +56,18 @@ def make_persistence() -> configparser.ConfigParser:
     return persistence
 
 
-def build_device(cls, dev_path: str):
+def build_device(cls, dev_path: str, config: Optional[configparser.ConfigParser] = None):
     """
     Build a device without a D-Bus connection, with the same arguments daemon.py uses.
 
     The caller owns the result and must close() it.
+
+    :param config: Daemon configuration, make_config() if None
     """
+    if config is None:
+        config = make_config()
     with mock.patch.object(DBusService, '__init__', lambda self, object_path: None):
-        return cls(device_path=dev_path, device_number=0, config=make_config(),
+        return cls(device_path=dev_path, device_number=0, config=config,
                    persistence=make_persistence(), testing=True,
                    additional_interfaces=[], additional_methods=[],
                    unknown_serial_counter={})
